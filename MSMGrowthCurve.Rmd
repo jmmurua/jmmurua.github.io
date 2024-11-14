@@ -1,0 +1,122 @@
+---
+title: "MSM Growth Curve"
+author: "Abby Simpson"
+date: "Nov 4, 2022"
+output:
+  html_document:
+    highlight: pygments
+    theme: cosmo
+    toc: yes
+  pdf_document:
+    toc: yes
+---
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Purpose
+Determine the aromatic carbon sources that **Paraburkholderia gelensis sp. nov** can grow on and differentiate it biochemically from other closely related **Parabukrholderia** species.
+
+Grow **Paraburkholderia gelensis sp. nov** and five closely related strains in minimal salt media (MSM) with 11 different carbon sources. Check OD every day
+
+Verify previously collected data from **Paraburkholderia madseniana** and determine how **Paraburkholderia gelensis sp. nov** grows in minimal salt media (MSM) with 4 parabens or diazdolidinyl urea as sole carbon source
+
+# Load Libraries & Data
+
+```{r load libraries}
+library(tidyverse)
+setwd("/Users/abbysimpson/Documents/Roli/Paraburkholderia/MSMGrowth/MSMGrowth - Pm verification & paraben sole carbon source/")
+```
+
+Load Data
+
+```{r Load data}
+Design <- readxl::read_xlsx(path = "MSM102922Design.xlsx") %>%
+  mutate(Well=case_when(Column < 10 ~ paste(Row, Column, sep="0"),
+                        TRUE ~ paste(Row, Column, sep="")))
+file.list <- list.files(pattern="*.xls$")
+df.list <- lapply(file.list[1:10], readxl::read_excel, sheet="List ; Plates 1 - 1",
+                               col_names=TRUE)
+timesdf.list <- lapply(file.list, readxl::read_excel, sheet="Protocol",
+                               col_names=TRUE) 
+times.list <- NULL
+for (i in 1:length(timesdf.list)) {
+  times.list <- rbind(times.list, c(file.list[i], 
+                                    str_split_fixed(timesdf.list[[i]][["Protocol description"]][36],
+                                               " ", n=5)[4],
+                                    str_split_fixed(timesdf.list[[i]][["Protocol description"]][36],
+                                               " ", n=5)[5]))}
+colnames(times.list) <- c("file", "Date", "ClockTime")
+RawResults <- bind_rows(df.list, .id = "id") %>%
+  mutate(file=file.list[as.numeric(id)]) %>%
+  left_join(., as_tibble(times.list)) %>%
+  left_join(., Design) %>%
+  mutate(DateTime=lubridate::mdy_hms(paste(Date, ClockTime, " "))) %>%
+  mutate(InnoculatedDate=pull(.[1,], "DateTime"),
+         ElapsedTime=lubridate::int_length(lubridate::interval(InnoculatedDate, DateTime))/3600)
+```
+
+```{r}
+CorrectedResults <- NULL
+for (i in unique(RawResults$id)){
+  CorrectedResults <- filter(RawResults, id==i) %>%
+    mutate(CorrectedAbsorbance=`Copy of Absorbance @ 600 (0.1s) (A)` - 
+             pull(filter(., Well=="A01"),
+                  `Copy of Absorbance @ 600 (0.1s) (A)`)) %>%
+    rbind(., CorrectedResults)
+}
+```
+
+
+# Aromatic Use - Figure
+```{r}
+CorrectedResults %>%
+  filter(Isolate=="P. madseniana") %>%
+  ggplot() +
+  aes(x=ElapsedTime, y=CorrectedAbsorbance, color=Carbon) +
+  geom_point() +
+  geom_smooth(level=0) +
+  facet_wrap(facets=vars(Concentration)) +
+  labs(x="Hours", y="OD", color="Carbon Source") +
+  theme_classic() + scale_color_brewer(palette = "Paired")
+  
+```
+
+```{r}
+CorrectedResults %>%
+  filter(Isolate=="P. gelicola" & ElapsedTime <  100) %>%
+  mutate(Carbon = case_when(Carbon=="B" ~ "Butylparaben",
+                            Carbon=="D" ~ "Diazolidinyl Urea",
+                            Carbon=="E" ~ "Ethylparaben",
+                            Carbon=="GL" ~ "Glucose",
+                            Carbon=="M" ~ "Methylparaben",
+                            Carbon=="N" ~ "No Carbon Control",
+                            Carbon=="P" ~ "Propylparaben"),
+         Carbon = factor(Carbon, levels=c("No Carbon Control",
+                                             "Glucose", "Methylparaben",
+                                             "Ethylparaben", "Propylparaben",
+                                             "Butylparaben", "Diazolidinyl Urea"))) %>%
+  ggplot() +
+  aes(x=ElapsedTime, y=CorrectedAbsorbance, color=Concentration) +
+  geom_point() +
+  geom_smooth(se=FALSE) +
+  facet_wrap(facets=vars(Carbon)) +
+  labs(x="Hours", y="OD", color="Concentration") +
+  theme_classic() + scale_color_brewer(palette = "Paired")
+  
+```
+
+
+
+```{r}
+CorrectedResults %>%
+  select(Well, Isolate, Concentration, Carbon, Rep, Media, Note, ElapsedTime, CorrectedAbsorbance) %>%
+  arrange(ElapsedTime) %>%
+  mutate(ElapsedTime=paste(round(ElapsedTime, 0), "hours", sep=""),
+          CorrectedAbsorbance=round(CorrectedAbsorbance, 2)) %>%
+  pivot_wider(names_from=ElapsedTime,values_from=CorrectedAbsorbance) %>%
+  write_delim("AgglomeratedResults.csv", delim=",")
+```
+
