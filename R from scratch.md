@@ -5,11 +5,9 @@ permalink: https://jmmurua.github.io/R_From_Scratch/
 subtitle: "The Fundamentals"
 author: "José M. Murúa Royo"
 date: "03-22-2023"
-output: 
-    pdf_document:
-        number_sections: true
+
 ---
-\newpage
+
 
 # Table of contents
 
@@ -56,7 +54,7 @@ output:
 - [Suggested readings]
 - [APENDIX]
     - [Functions used in this document]
-\newpage
+
 
 # Introduction
 
