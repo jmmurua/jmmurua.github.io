@@ -1,0 +1,687 @@
+---
+title: "New Extracellular Enzyme Regulation in DEMENT"
+author: "Jose M. Murua Royo"
+date: "2024-07-05"
+output: 
+  pdf_document:
+    number_sections: true
+    fig_caption: yes
+---
+
+# Summary
+This document describes the implementation and the performance of a novel extracellular enzyme regulation mechanism in DEMENT. First, the rationale of the mechanism and its implementation are described. Then, the outcome of simulations ran with this mechanism are compared to the results of simulations using the old enzyme mechanism as point of comparison.
+
+# Table of contents
+
+- [Implementation of the new mechanism]
+    - [Function for repressing enzyme production]
+- [Performance of the new mechanism]
+    - [Simulation layout]
+    - [Enzyme dynamics]
+    - [Mineralization dynamics]
+    - [Patterns of microbial biomass production]
+    - [Additional patterns: Mass loss and litter stoichiometry]
+\newpage
+
+# Implementation of the new mechanism
+The extracellular enzyme production in DEMENT involves a constitutive and an inducible component. The constitutive production is constant and independent of nutrient availability. As long as a taxon possesses a gene for an enzyme it will be produced at a pre-established rate defined as a proportion of microbial biomass. The inducible production is dependent of nutrient availability and it is defined as a fraction of carbon uptake. Inside the RunPulse function of DEMENT, taxon-specific enzyme production in each grid box is calculated as:
+
+$$ Enz = U_{C} \times E_{ind} + B\times E_{const} \tag {1} $$
+Where $U_C$ is a vector (length $=$ number of taxa $\times$ grid size) containing the carbon uptake computed in each grid box for each taxa. $E_{ind}$ is a matrix (rows $=$ number of taxa $\times$ grid size, columns = number of enzymes) containing the fraction of carbon uptake that is allocated as induced enzyme production. $B$ is a vector (length $=$ number of taxa $\times$ grid size) containing the amount of biomass of each taxa in each grid box. $E_{const}$ is a matrix (rows $=$ number of taxa $\times$ grid size, columns $=$ number of enzymes) containing the fraction of biomass that is allocated as constitutive enzyme production. Since uptake is proportional to the amount of microbial biomass, both inducible and constitutive production are proportional to microbial biomass.
+
+The absence of a repression response in the production of extracellular enzymes is unrealistic. For optimality reasons, a microbe should produce enzymes only when necessary. For example, studies with *S. cerevisiae* describe three types of responses in conditions of phosphorus starvation: 1) Mobilization of internal stores of phosphate, 2) Up-regulation of membrane transporters involved in phosphate uptake (Pho84), and 3) Increase in production of extracellular phosphatases, like Pho5 (Thomas & O'Shea, 2005). Interestingly, at intermediate phosphorus conditions, the membrane transporter is expressed but not the phosphatase, whose expression is restricted to extreme phosphate deprivation. The cytosolic concentration of phosphate is the key factor that regulates this. We can then generalize this case to other elements and say: "When the uptake of the monomer produced by an enzyme is low, enzyme production should occur. However, as the uptake of that monomer increases, the production of the enzyme will be reduced up to a point where it will be completely shut down". For convenience, regulation of extracellular enzyme production should be element-specific to provide a stoichiometric regulation
+
+There is extensive empirical evidence of nutrient control of extracellular enzyme activity. For example, proteolytic enzyme activity as well as the activity of enzymes targeting N-containing carbohydrates like chitin and peptidoglican is strongly suppressed by simple forms of N like ammonium (Allison and Vitousek, 2005). On the other hand, and increase in N availability can increase the activity of C-acquiring enzymes, like cellulases  by artificially causing C-limitation (Saiya-Cork et al. 2002, Allison & Vitousek, 2005). In order to regulate each enzyme by the total uptake in units of a specific element (i.e., carbon, nitrogen, or phosphorus), I need to define a priori which elements regulate which enzymes. The table below summarizes this information.
+
+
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE}
+library(tidyverse)
+
+tab1 <- data.frame(Substrate = c("Cellulose", "Hemicellulose", "Starch", "Chitin", "Lignin", "Protein", "Inactive enzyme", "Organic phosphorus", "Necromass"),
+`Regulating element` = c("Carbon", "Carbon", "Carbon", "Nitrogen", "Nitrogen", "Nitrogen", "Nitrogen", "Phosphorus", "Nitrogen or Phosphorus")) 
+
+knitr::kable(tab1, booktabs = TRUE, caption = "Regulating elements of enzyme production")
+
+```
+Note that necromass is regulated by both nitrogen and phosphorus. That is because I decided to treat necromass as a wildcard for microbes depending on the most limiting nutrient. If nitrogen is limiting over phosphorus, then nitrogen regulates the degradation of necromass.
+
+Inside the TraitModel function in DEMENT it is defined which enzymes degrade which substrates in an object named ReqEnz. Here is an example using a pool of 7 enzymes, where each enzyme degrades only one substrate.
+
+```{r, echo=FALSE}
+
+# Defining required function
+expand <- function(x, grid.size) {
+  matrix(rep(t(x), grid.size), 
+         ncol = dim(x)[2], 
+         byrow = T, 
+         dimnames = list(rep(rownames(x), grid.size), colnames(x)))
+}
+
+grid.size <- 10*10
+
+# Enzymes required for substrate degradation
+  # Rows are substrates; cols are enzymes
+  # Same number within row implies redundancy
+  # Ensures each substrate is degraded by at least 1 enzyme and every enzyme degrades at least 1 substrate
+  
+ReqEnz1 <- c(0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+
+  ReqEnz1 <- matrix(ReqEnz1,
+                    nrow = 12,
+                    ncol = 7,
+                    byrow = F)
+  
+  
+# Choose some substrates that require multiple enzymes
+  probability_vector <- rep(0, 8)
+  if(0 > 0) probability_vector[1:0] <- 1
+  ReqEnz2 <- sample(probability_vector,
+                    12*8,
+                    replace = T)
+  ReqEnz2[ReqEnz1 == 1] <- 0
+  ReqEnz2 <- matrix(ReqEnz2,
+                    nrow = 12,
+                    ncol = 8,
+                    byrow = T)
+  for(j in 1:dim(ReqEnz2)[1]) {
+    # Put in NAs if the substrate does not require a second enzyme
+    if(rowSums(ReqEnz2)[j] == 0) ReqEnz2[j, ] <- NA
+  }
+  
+# Generate the correct structure for the required enzyme matrices
+  ReqEnz <- c(expand(ReqEnz1, grid.size), expand(ReqEnz2, grid.size))
+  # rows, cols, stacks; default assemble by cols
+  ReqEnz <- array(ReqEnz,
+                  dim = c(grid.size*12,
+                          7,2),
+                  dimnames = list(rep(sprintf("%s%03d","Sub",1:12), grid.size),
+                                  sprintf("%s%03d","Enz",1:7),c("set1","set2")))
+  
+  # Substrate concentrations
+  substrates.frame <- read.table("CN90_CP360/substrates.txt", 
+                                 header = TRUE, 
+                                 sep = "\t",
+                                 stringsAsFactors = F,
+                                 row.names = 1)
+  Substrates <- data.matrix(substrates.frame)
+  
+  rownames(ReqEnz) <- rep(rownames(substrates.frame), grid.size)
+  
+  head(ReqEnz[,,1], 12)
+
+```
+
+
+I use this matrix to then establish which enzymes are regulated by which elements via a "look-up table" like the one below:
+
+```{r, echo=FALSE}
+  
+  # Making matrix to define which monomers track which elements for downregulating induced enzyme production
+  ReqEnz3 <- ReqEnz[,,1][1:12,]
+
+  Subs.track <- data.frame(C = c(0, 0, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0), # Defining which substrates track which elements
+                           N = c(1, 1, 0, 0, 0, 1, 1, 1, 1, 1, 0, 0),
+                           P = c(1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1), 
+                           row.names = rownames((substrates.frame)))
+  Enz.track <- t(Subs.track[rep(rownames(ReqEnz3), 7)[c(ReqEnz3 == 1)],]) # Table of element that regulates induced production of each enzyme
+  colnames(Enz.track) <- colnames(ReqEnz3)
+  Subs.track.look <- data.frame(element = c("NP", "N", "C", "C", "C", "N", "N", "N", "N", "N", "P", "P"),
+                                row.names = rownames((Substrates)))
+  Enz.track.look <- as.vector(t(Subs.track.look[rep(rownames(ReqEnz3), 7)[c(ReqEnz3 == 1)],]))
+  names(Enz.track.look) <- colnames(ReqEnz3)
+  
+  Enz.track.look
+
+```
+
+To summarize, the idea of implementing the new mechanism is to down-regulate enzyme production based on the level of uptake of a relevant element. The simplest way to do this is to take the induced enzyme component (i.e., fraction of carbon uptake) and decrease this number when appropriate. $E_{ind}$ is defined for each enzyme for each taxa, so it is possible to regulate each enzyme based on the uptake of the corresponding element (Table 1). To do this it is necessary to first define the actual function used to down-regulate enzyme production.
+
+
+## Function for repressing enzyme production
+To down-regulate enzyme production according to the uptake of a specific element I must establish a mathematical expression. I follow the logic of Bonachela et al. (2013) and use a sigmoid function:
+
+$$  E_{rep} = {e^{a(x - b)} \over s + e^{a(x - b)}} \tag {2} $$
+where $E_{rep}$ is the coefficient of enzyme repression, which takes a value between 0 and 1. $E_{rep}$ will be eventually multiplied to $E_{ind}$ and $E_{const}$; $a = -12$, $b = 0.75$, and $s = 1$ are parameters that control the shape of the sigmoid curve. The structure of the function and the values of these parameters lack any biological relevance, but they were chosen since the resulting sigmoid curve makes sense biologically. The variable $x$ represents the x axis of the sigmoid curve, which is the variable controlling the level of repression. Determining this variable is a critical decision to make this function biologically sound. I discussed earlier that given the existing structure of enzyme production in DEMENT, the uptake of the relevant element should be the one regulating an enzyme's production. Nevertheless, how much is too much uptake? and how much is too little? To solve this issue, the uptake of a given element should be normalize by a relevant quantity. DEMENT has already define minimum quotas of carbon, nitrogen, and phosphorus as parameters. These values are the criteria to determine when microbes die due to starvation. Whenever a taxon in a grid box reaches a biomass level below the minimum quota, it dies. I used these values to normalize the uptake of these elements, since taking up resources that double the minimum quota is more than enough to ensure survival (even account for maintenance costs). As a result, when $x = 1$ it means the uptake calculated for that time step for a specific microbe for a specific grid box is equal to the minimum quota. The defined curve looks like this:
+
+```{r, echo=FALSE, fig.cap="Enzyme repression function from equation 2. The y axis represents the coefficient of enzyme repression and the x axis is the controlling variable. When the controlling variable is close to 0, the repression coefficient approaches 1. When the controlling variable reaches a value of 1, the repression coefficient approaches 0.", fig.width=4, fig.height=3}
+
+# 
+
+
+Sigmoid <- function(x){
+  
+  sigmoid <- exp(a*(x - b)) / (s + exp(a*(x - b) ))
+  sigmoid
+  
+}
+
+a <- -12    # Originial is -12. Decreasing this parameter makes the sigmoid aproach to linearity
+b <- 0.75   # Original is 0.75. Changing this parameter displaces the sigmoid left or right
+s <- 1      # Binary parameter that choses between the sigmoid and a horizontal line with intercept = 1
+x <- seq(0, 2, length.out = 1000)
+
+sigmoid.out <- data.frame(y = Sigmoid(x = x), x = x)
+
+sigmoid.out %>%
+  ggplot(aes(x = x, y = y)) +
+  geom_line() +
+  labs(y = "Enzyme repression coefficient", x = "Controlling variable") +
+  theme_classic()
+
+```
+
+When uptake is low and approaches 0, the enzyme production is not repressed and it's close to its maximum (value of 1). When uptake is high and is close to 1 or higher, the enzyme productions is repressed and approaches 0.
+
+Let's look at the simplest example of a single taxa with four enzymes. The first three enzymes are regulated by carbon, nitrogen, and phosphorus, while the last enzyme targets necromass and is therefore regulated by nitrogen or phosphorus depending on which one is the most limiting. Let's assume that for the current time step, the computed values of uptake are 0.0516 for carbon, 0.004 for nitrogen, and 0.0015 for phosphorus. These values are normalized by the corresponding minimum quotas (C = 0.086, N = 0.012, P = 0.002). The normalized values of uptake yield 0.6 for carbon, 0.333 for nitrogen, and 0.75 for phosphorus. Using equation 2, the calculated coefficients of repression are 0.86 for carbon, 0.99 for nitrogen, and 0.5 for phosphorus. Since nitrogen is limiting over phosphorus, it will regulate enzymes 2 and 4. This means that a repression coefficient of 0.99 will be multiplied to the inducible and constitutive production rates of enzymes 2 and 4. A coefficient of 0.86 will be multipied to the production rates of enzyme 1. And finally, a coefficient of 0.5 will be multiplied to the production rates of enzyme 3. In other words, the phosphatase will not be produce at full capacity, but rather at 50% of full capacity.
+
+<!-- The repression of enzyme production is computed for each grid box and for each taxa. Consequently, to determine if enzyme production should be repressed, I calculate the per-capita uptake per taxa per grid box for each element. This uptake is divided by the respective element minimum quota specified in the parameter file. These values of uptake are then used to compute the level of repression for each element with the function described above. Finally, I use the look-up table shown above to determine the level of repression of each enzyme depending on its regulating element. -->
+
+<!-- The computed level of repression, which can take a value between 0 and 1 (0 being maximum repression), is then multiplied by the inducible and constitutive enzyme production. This effectively down-regulates the production of an enzyme when the uptake of the regulating element is too high. -->
+\newpage
+
+# Performance of the new mechanism
+
+```{r, echo=FALSE, include=FALSE}
+
+# Specifying folder for specific litter chemistry, choose one
+CN.CP <- "CN90_CP360"
+
+
+# Loading substrates file
+substrates <- read.table(str_glue(CN.CP, "/substrates.txt"))
+substrates$NC <- substrates$N/substrates$C
+substrates$NC[!is.finite(substrates$NC)] <- 0
+substrates$PC <- substrates$P/substrates$C
+substrates$PC[!is.finite(substrates$PC)] <- 0
+
+
+# Loading the data (choose relevant one)
+main.dir <- str_glue(CN.CP, "/outputs/MechTest")
+
+all.Data <- paste(main.dir, list.files(path = main.dir, recursive = TRUE, pattern = ".RData"),
+                  sep = "/")
+
+
+# Function to load multiple RData files without overwriting identical named objects
+loadEnvironment <- function(RData, env = new.env()){
+  load(RData, env)
+  return(env)
+}
+
+
+# Creating the names of the environments where the data will be stored
+envs <- str_c(
+  str_extract(str_split(all.Data, "/", simplify = TRUE)[,4], "[0-9]{12}"),
+  rep(".env", length(all.Data)))
+Envs <- str_c(envs, unlist(sapply(table(envs), FUN = function(x){1:x[1]}, simplify = TRUE)))
+
+
+
+# Saving .RData files in separate environments
+for(i in 1:length(all.Data)){
+  
+  assign(Envs[i], loadEnvironment(all.Data[i]))
+}
+
+
+# Naming the simulations
+Sims <- str_remove(Envs, ".env")
+XSims <- rep(NA, length(Sims))
+
+for(i in 1:length(XSims)){
+  XSims[i] <- str_glue("X", Sims[i])
+}
+
+
+# Choose pulse
+p <- 1
+
+# Loading biomass series for each simulation
+Mic_Sum <- vector(length = length(Envs), mode = "list")
+
+for (i in 1:length(Envs)){
+  Mic_Sum[[i]] <- get(Envs[i])$out[[p]]$Mic_Sum
+  
+}
+
+names(Mic_Sum) <- Sims
+
+Biomass <- lapply(Mic_Sum, rowSums)
+
+
+# Loading enzyme secretion series for each simulation
+EnzSer <- vector(length = length(Envs), mode = "list")
+
+for (i in 1:length(Envs)){
+  EnzSer[[i]] <- get(Envs[i])$out[[p]]$EnzymesSeries
+  rownames(EnzSer[[i]]) <- NULL
+}
+
+names(EnzSer) <- Sims
+
+EnzSer <- lapply(EnzSer, cbind, days = 1:nrow(EnzSer[[1]]))
+EnzSer <- lapply(EnzSer, as.data.frame)
+
+# Adding simulation ID as a column
+for (i in 1:length(EnzSer)){
+  EnzSer[[i]] <- cbind(EnzSer[[i]], Simulation = rep(names(EnzSer)[i], nrow(EnzSer[[i]])))
+  
+}
+
+
+# Loading NH3 and PO4 series
+NH4Ser <- vector(length = length(Envs), mode = "list")
+PO4Ser <- vector(length = length(Envs), mode = "list")
+
+for (i in 1:length(Envs)){
+  NH4Ser[[i]] <- get(Envs[i])$out[[p]]$NH4Series
+  #colnames(NH4Ser[[i]]) <- "NH4"
+  
+  PO4Ser[[i]] <- get(Envs[i])$out[[p]]$PO4Series
+  #colnames(PO4Ser[[i]]) <- "PO4"
+  
+}
+
+names(NH4Ser) <- Sims
+names(PO4Ser) <- Sims
+
+
+# Loading respiration series for each simulation
+RespSeries <- vector(length = length(Envs), mode = "list")
+
+for(i in 1:length(Envs)){
+  RespSeries[[i]] <-  get(Envs[i])$out[[p]]$RespSeries
+}
+
+names(RespSeries) <- Sims
+
+
+# Loading cummulative substrate series for each simulation
+Cum_SubstrateSeries <- vector(length = length(Envs), mode = "list")
+
+for(i in 1:length(Envs)){
+  
+  Cum_SubstrateSeries[[i]] <- get(Envs[[i]])$out[[p]]$Cum_SubstrateSeries
+}
+
+names(Cum_SubstrateSeries) <- Sims
+
+
+# Loading substrate series for each simulation
+SubstratesSeries <- vector(length = length(Envs), mode = "list")
+
+for(i in 1:length(Envs)) {
+  
+  SubstratesSeries[[i]] <- get(Envs[[i]])$out[[p]]$SubstratesSeries
+  
+}
+
+names(SubstratesSeries) <- Sims
+
+SubstratesSeries <- lapply(SubstratesSeries, cbind, days = 1:nrow(SubstratesSeries[[1]]))
+SubstratesSeries <- lapply(SubstratesSeries, as.data.frame)
+
+# Adding simulation ID as a column
+for (i in 1:length(SubstratesSeries)){
+  SubstratesSeries[[i]] <- cbind(SubstratesSeries[[i]], Simulation = rep(names(SubstratesSeries)[i], nrow(SubstratesSeries[[i]])))
+  
+}
+
+
+# Litter mass time-series for each simulation
+Litter <- lapply(Cum_SubstrateSeries, rowSums)
+
+
+# Litter C:N time-series for each simulation
+L.CN <- lapply(Cum_SubstrateSeries, FUN = function(x){x[, "C"]/x[, "N"]})
+
+
+# Litter C:P time-series for each simulation
+L.CP <- lapply(Cum_SubstrateSeries, FUN = function(x){x[, "C"]/x[, "P"]})
+
+
+# Litter C:P time-series for each simulation
+L.NP <- lapply(Cum_SubstrateSeries, FUN = function(x){x[, "N"]/x[, "P"]})
+
+
+
+# Loading enzyme identity
+ReqEnz <- get(Envs[1])$out[[1]]$ReqEnz[[1]]
+rownames(ReqEnz) <- rownames(substrates)
+
+
+# Series of litter associated substrates only
+Litter.subs <- lapply(SubstratesSeries, function(x) x[, c(rownames(substrates)[-1:-2], "Simulation", "days")])
+
+
+
+
+# ------------------------------------------------------------------------------
+#                            Putting all together
+
+
+Biomass.df <- as.data.frame(Biomass) %>%  cbind(days = 1:length(Biomass[[1]])) %>%
+              pivot_longer(cols = 1:length(Biomass), names_to = "Simulation", 
+                           values_to = "Biomass") %>% 
+              separate(Simulation, into = c("date", "hour", "parms"), 
+                       sep = c(7, 11), remove = FALSE)
+              
+
+Respiration.df <- as.data.frame(RespSeries) %>%  cbind(days = 1:length(RespSeries[[1]])) %>%
+                  pivot_longer(cols = 1:length(RespSeries), names_to = "Simulation", 
+                               values_to = "Respiration")
+
+
+Litter.df <- as.data.frame(Litter) %>%  cbind(days = 1:length(Litter[[1]])) %>%
+  pivot_longer(cols = 1:length(Litter), names_to = "Simulation", 
+               values_to = "Litter")
+
+Litter.subs.df <- do.call("rbind", Litter.subs)
+rownames(Litter.subs.df) <- NULL
+Litter.subs.df$Litter.C <- rowSums(Litter.subs.df[, rownames(substrates)[-1:-2]])
+
+# Making matrix of substrate C:N values
+subsNC.m <- matrix(substrates[-1:-2,"NC"], byrow = TRUE, ncol = 10, nrow = dim(Litter.subs.df)[1])
+colnames(subsNC.m) <- rownames(substrates[-1:-2,])
+
+# Making matrix of substrate C:P values
+subsPC.m <- matrix(substrates[-1:-2,"PC"], byrow = TRUE, ncol = 10, nrow = dim(Litter.subs.df)[1])
+colnames(subsPC.m) <- rownames(substrates[-1:-2,])
+
+
+# Substrate series in nitrogen units
+Litter.subsN.df <- Litter.subs.df[,rownames(substrates[-1:-2,])]*subsNC.m
+Litter.subsN.df$Litter.N <- rowSums(Litter.subsN.df)
+Litter.subsN.df <- cbind(Litter.subsN.df, Litter.subs.df[,c("Simulation", "days")])
+
+# Substrate series in phosphorus units
+Litter.subsP.df <- Litter.subs.df[,rownames(substrates[-1:-2,])]*subsPC.m
+Litter.subsP.df$Litter.P <- rowSums(Litter.subsP.df)
+Litter.subsP.df <- cbind(Litter.subsP.df, Litter.subs.df[,c("Simulation", "days")])
+
+
+Litter.CN <- data.frame(Litter.CN = Litter.subs.df$Litter.C/Litter.subsN.df$Litter.N,
+                        Simulation = Litter.subs.df$Simulation,
+                        days = Litter.subs.df$days)
+
+Litter.CP <- data.frame(Litter.CP = Litter.subs.df$Litter.C/Litter.subsP.df$Litter.P,
+                        Simulation = Litter.subs.df$Simulation,
+                        days = Litter.subs.df$days)
+
+
+Litter.subs.df.l <- 
+  Litter.subs.df %>%
+  pivot_longer(cols = rownames(substrates)[-1:-2], names_to = "Substrate", values_to = "Abundance")
+
+# Adding variable for the element that is regulating degradation of each substrate
+subs.track.look <- data.frame(element = c("NP", "N", "C", "C", "C", "N", "N", "N", "N", "N", "P", "P"),
+                              row.names = rownames((substrates)))
+Litter.subs.df.l$Subs.type <- subs.track.look[Litter.subs.df.l$Substrate,]
+
+
+L.CN.df <- as.data.frame(L.CN) %>%  cbind(days = 1:length(L.CN[[1]])) %>%
+  pivot_longer(cols = 1:length(L.CN), names_to = "Simulation", 
+               values_to = "L.CN") 
+
+L.CP.df <- as.data.frame(L.CP) %>%  cbind(days = 1:length(L.CP[[1]])) %>%
+  pivot_longer(cols = 1:length(L.CP), names_to = "Simulation", 
+               values_to = "L.CP") 
+
+L.NP.df <- as.data.frame(L.NP) %>%  cbind(days = 1:length(L.NP[[1]])) %>%
+  pivot_longer(cols = 1:length(L.NP), names_to = "Simulation", 
+               values_to = "L.NP") 
+  
+
+NH4Ser.df <- cbind(as.data.frame(NH4Ser), days = 1:length(NH4Ser[[1]])) %>%
+             pivot_longer(cols = 1:length(NH4Ser), names_to = "Simulation",
+                          values_to = "NH4")
+
+PO4Ser.df <- cbind(as.data.frame(PO4Ser), days = 1:length(PO4Ser[[1]])) %>%
+             pivot_longer(cols = 1:length(PO4Ser), names_to = "Simulation",
+                          values_to = "PO4")
+
+NutSer.df <- inner_join(NH4Ser.df, PO4Ser.df)
+NutSer.df.l <- NutSer.df %>% pivot_longer(cols = c("NH4", "PO4"), names_to = "Nutrient", values_to = "Amount")
+
+
+
+EnzSer.df <- do.call("rbind", EnzSer) 
+rownames(EnzSer.df) <- NULL
+EnzSer.df <- EnzSer.df[, c(names(which(colSums(EnzSer.df[,1:40]) > 0)), "days", "Simulation")] # Leaving only relevant enzymes
+
+
+EnzSer.df.l <- 
+EnzSer.df %>%
+  pivot_longer(cols = starts_with("Enz"), names_to = "Enzyme", values_to = "Abundance")
+
+# Adding variable for the element that is regulating each enzyme
+EnzSer.df.l$Enz.type <-  get(Envs[1])$out[[1]]$Enz.track.look[EnzSer.df.l$Enzyme]
+
+
+
+# Integrating biomass in time
+library(pracma)
+
+Tot.Biomass <- 
+Biomass.df %>% group_by(Simulation) %>% 
+  summarize(days = days, Biomass = Biomass, Tot.Biomass = trapz(days, Biomass)) %>%
+  summarize(Tot.Biomass = mean(Tot.Biomass))
+
+
+# Adding variable for point of repression
+Sim.look <- c("2", "1", "0.7", "0.5", "0.3", "No repression")
+names(Sim.look) <- Sims
+
+Sim.look2 <- Sim.look
+names(Sim.look2) <- XSims
+
+Sim.look3 <- c("2" = "Repression", "1" = "Repression", "0.7", "Repression", "0.5", "Repression", "0.3" = "Repression", "No repression" = "No repression")
+
+
+Tot.Biomass$Repression.point <- Sim.look2[Tot.Biomass$Simulation]
+Biomass.df$Repression.point <- Sim.look2[Biomass.df$Simulation]
+Respiration.df$Repression.point <- Sim.look2[Respiration.df$Simulation]
+Litter.df$Repression.point <- Sim.look2[Litter.df$Simulation]
+Litter.subs.df$Repression.point <- Sim.look[Litter.subs.df$Simulation]
+Litter.subs.df.l$Repression.point <- Sim.look[Litter.subs.df.l$Simulation]
+Litter.CN$Repression.point <- Sim.look[Litter.CN$Simulation]
+Litter.CP$Repression.point <- Sim.look[Litter.CP$Simulation]
+L.CN.df$Repression.point <- Sim.look2[L.CN.df$Simulation]
+L.CP.df$Repression.point <- Sim.look2[L.CP.df$Simulation]
+L.NP.df$Repression.point <- Sim.look2[L.NP.df$Simulation]
+NutSer.df.l$Repression.point <- Sim.look2[NutSer.df.l$Simulation]
+EnzSer.df.l$Repression.point <- Sim.look[EnzSer.df.l$Simulation]
+EnzSer.df.l$Repression <- Sim.look3[EnzSer.df.l$Repression.point]
+
+
+```
+
+## Simulation layout
+
+To test the consequences of the new mechanism, simulations were performed to compare the output of the old and new mechanisms. Additionally, modifications of the new mechanisms were ran, changing the point of repression. The description of the mechanism stated above assumes a repression point equal to the minimum quota of the regulating element (i.e., when the x axis of Figure 1 equals 1). This repression point was varied to asses potential consequences. The uptake level at which total repression happened was modified yielding five different scenarios: 2 times minimum quota, equal to minimum quota, 70% of minimum quota, half the minimum quota, and 30% of minimum quota.
+
+For simplicity, simulations involved only one taxa with 12 enzymes in a 10 by 10 grid. The substrates file was modified so that the litter C:N was equal to 90 (original C:N ~ 41) to represent a more severe elemental imbalance. Litter C:P ratio was 360 as in the original file, implying abundant availability of phosphorus relative to nitrogen (N:P = 4). All simulations shared the same seed number.
+\newpage
+
+## Enzyme dynamics
+
+The new mechanism influenced the dynamics of enzyme production, successfully down-regulating enzyme production when nutrient availability was high. Figure 2 depicts enzyme abundance over time, where enzymes are pooled together based on the element that regulates them:
+
+```{r, echo=FALSE, fig.cap="Enzyme abundance over time: Colors represent the regulating element of each enzyme (Table 1). Panels separate simulations by repression point, 0.3 being the most severe repression. The gray dashed line represents the scenario of no repression. This is a single curve because, in the old mechanism, all enzymes produced by a taxon depend on the same magnitudes (constitutive and induced) and therefore, all enzymes share the same production pattern."}
+
+# Enzymes
+EnzSer.nr <- EnzSer.df.l %>% filter(Repression.point == "No repression") %>%
+             select(-Repression.point)
+
+EnzSer.df.l %>% filter(Repression.point != "No repression") %>%
+  ggplot(aes(x = days, y = Abundance)) +
+  geom_path(data = EnzSer.nr, aes(group = Enzyme), linetype = "dashed", color = "gray") +
+  geom_path(aes(group = Enzyme, color = Enz.type)) +
+  facet_wrap(~Repression.point, ncol = 3) +
+  labs(x = "Time (days)", y = "Enzyme abundance", color = "Enzyme type", subtitle = "Repression point") +
+  theme_classic() +
+  theme(legend.position = c(0.8, 0.2))
+
+```
+
+The highest production was for N-acquiring enzymes followed by C-acquiring enzymes and P-acquiring enzymes being the lowest production. This is in accrodance with the nutrient conditions determined by the substrate, where nitrogen was the scarcest element and phosphorus the most abundant one (relative to stoichiometric needs).
+
+Moreover, it was also apparent a reduction in the enzyme C:N ratio relative to the scenario of no repression. Scenarios with a lower repression point (0.3 and 0.5) showed strong fluctuations in enzyme allocation, which are probably unrealistic.
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, fig.cap="Ratio of C- over N-acquiring enzymes over time: Panels represent the point of repression, 0.3 being the most severe repression. The dashed horizontal gray line represents an enzyme ratio of 1:1. "}
+
+# Enzyme allocation, C:N
+EnzSer.df.l %>% 
+  group_by(days, Simulation, Repression.point, Enz.type) %>% 
+  summarize(Tot.abundance = sum(Abundance)) %>%
+  pivot_wider(names_from = Enz.type, values_from = Tot.abundance) %>%
+  ggplot(aes(x = days, y = C/N)) +
+  geom_hline(yintercept = 1, linetype = "dashed", alpha = 0.5) +
+  geom_path() +
+  labs(y = "Enzyme C:N allocation", x = "Time (days)") +
+  facet_wrap(~Repression.point, ncol = 3) +
+  theme_classic()
+
+```
+
+With the appropriate regulation of enzyme production confirmed, the next step is to determine whether this regulation balanced the nutrient demands of the microbial biomass. This can be elucidated by examining the patterns of nutrient mineralization in the form of $CO_2$, $NH_4$, and $PO_4$.
+\newpage
+
+
+## Mineralization dynamics
+
+Figure 4 shows a reduction in the amount of respiration relative to the scenario of no repression, with the exception of the repression point $=$ 2. From Figure 2 we can see that the scenario with repression point $=$ 2 did not effectively repressed C-acquiring enzymes. This led to higher uptake of carbon, and consequently more carbon had to be released as $CO_2$.
+
+```{r, echo=FALSE, fig.width=6, fig.height=3.5, fig.cap="Respiration over time: Colors represent the repression point, 0.3 being the most severe repression.."}
+# Respiration
+Respiration.df %>%
+  ggplot(aes(x = days, y = Respiration)) + 
+  geom_path(aes(color = Repression.point)) +
+  labs(x = "Time (days)", color = "Repression point") +
+  theme_classic()
+
+```
+
+For nitrogen mineralization, the production of $NH_4$ shows very similar patterns for repression points of 1, and 2 relative to the scenario with no repression. These simulations only show nitrogen mineralization during the first days of decomposition, followed by no mineralization at all. This is coherent with nitrogen being the limiting nutrient.
+
+Repression points of 0.7, 0.5, and 0.3 significantly increased the levels of $NH_4$ production, suggesting a change in the limiting nutrient, probably induced by excessive repression of carbon and phosphorus acquisition.
+
+```{r, echo=FALSE, fig.width=6, fig.height=3.5, fig.cap="Nitrogen mineralization over time: Colors represent the repression point, 0.3 being the most severe repression."}
+
+# NH4
+NutSer.df.l %>% filter(Nutrient == "NH4") %>%
+  ggplot(aes(x = days, y = Amount)) +
+  geom_path(aes(color = Repression.point)) +
+  labs(x = "Time (days)", y = "NH4", color = "Repression point") +
+  theme_classic()
+
+```
+
+$PO_4$ production was severely repressed relative to the scenario with no repression. This is the most dramatic change and the most consistent one since phosphorus was the most abundant element relative to microbial demand.
+
+```{r, echo=FALSE, fig.width=6, fig.height=3.5, fig.cap="Phosphorus mineralization over time. Colors represent the repression point, 0.3 being the most severe repression."}
+
+NutSer.df.l %>% filter(Nutrient == "PO4") %>%
+  ggplot(aes(x = days, y = Amount)) +
+  geom_path(aes(color = Repression.point)) +
+  labs(x = "Time (days)", y = "PO4", color = "Repression point") +
+  theme_classic()
+
+```
+
+From these patterns we can conclude that enzyme regulation effectively balanced (although not perfectly) microbial demands as seen particularly in the dramatic reduction of phosphorus mineralization.
+
+In spite of this supporting evidence for the effectiveness of the new regulatory mechanism of enzyme production, it must be determined whether this regulation is reasonable in terms of optimality. This can be assessed by examining the patterns of biomass production.
+\newpage
+
+## Patterns of microbial biomass production
+
+Even though the mechanism described above is biologically reasonable and is supported by empirical evidence, its implementation must be justified in the light of Occam's razor. Is it worth it to add additional complexity to a model that is already complex? Well, I can't give a definitive answer with the available data since we would need an extensive validation of both versions of the model. However, what I can do is to justify it with an optimality argument. We can expect that evolution has shaped microbial physiology so that mechanisms of nutrient acquisition would maximize the fitness of a given microbe.
+
+Figure 7 shows the patterns of biomass production for the different simulations. In general we can say that the mechanism of enzyme repression increase the amount of biomass produced during the simulation (Table 2). The repression point of 0.3 is the exception, meaning that is probably an unreasonable level of repression.
+
+```{r, echo=FALSE, warning=FALSE, fig.width=6, fig.height=3.5, fig.cap="Biomass over time: Colors represent the repression point, 0.3 being the most severe repression"}
+
+# Biomass
+Biomass.df %>%
+ggplot(aes(x = days, y = Biomass)) + 
+  geom_path(aes(color = Repression.point)) +
+  labs(x = "Time (days)", color = "Repression point") +
+  theme_classic()
+
+
+```
+
+```{r, echo=FALSE, warning=FALSE, message=FALSE}
+
+# Integrating biomass in time
+library(pracma)
+
+Tot.Biomass2 <- 
+Tot.Biomass %>% select(Repression.point, Tot.Biomass) %>% 
+  mutate(Tot.Biomass = signif(Tot.Biomass/100000, digits = 3))
+
+names(Tot.Biomass2) <- c("Repression point", "Total biomass")
+
+knitr::kable(Tot.Biomass2, booktabs = TRUE, caption = "Total biomass produced", align = "cc")
+
+```
+
+With this evidence we can conclude that the new mechanism of enzyme repression represents a real improvement in the representation of microbial nutrient acquisition in DEMENT.
+\newpage
+
+## Additional patterns: Mass loss and litter stoichiometry
+
+One of the main hypothesized consequences of selective enzyme production is the accumulation of undecomposed carbon (Manzoni et al., 2021; Boberg et al., 2008). Since carbon is unlikely to become the limiting element due to the severe elemental imbalance of plant litter, C-acquiring enzymes will most likely be repressed. This will in turn cause a faster decay for nitrogen and/or phosphorus, decreasing decay rates and increasing litter C:N and/or C:P over time.
+
+Figure 8 shows that mass loss is increasingly reduced with more severe enzyme repression (i.e., decreasing repression point).
+
+```{r, echo=FALSE, fig.cap="Litter remaining mass over time: Colors represent different repression points, with 0.3 being the most severe repression. Polymers that do not constitute and integral part of plant litter were excluded from this figure (e.g., necromass, inactive enzymes)", fig.width=6, fig.height=3.5}
+
+# Remaining mass (only litter polymers)
+Litter.subs.df %>% group_by(Simulation, Repression.point) %>%
+  mutate(Remaining = (Litter.C/max(Litter.C))*100) %>%
+  ggplot(aes(x = days, y = Remaining)) + 
+  geom_path(aes(color = Repression.point)) +
+  labs(x = "Time (days)", color = "Repression point", y = "Remaining mass (%)") +
+  theme_classic()
+
+```
+
+Surprisingly, litter C:N increases even when there is no repression mechanism present. Enzyme repression scenarios have a litter C:N plateau that is lower to the no repression scenario. 
+
+```{r, echo=FALSE, fig.cap="Litter C:N over time: Colors represent different repression points. Polymers that do not constitute and integral part of plant litter were excluded from this figure (e.g., necromass, inactive enzymes)", fig.width=6, fig.height=3.5}
+
+# Litter C:N (litter polymers only)
+Litter.CN %>% 
+  ggplot(aes(x = days, y = Litter.CN)) + 
+  geom_path(aes(color = Repression.point)) +
+  labs(x = "Time (days)", color = "Repression point") +
+  theme_classic()
+
+```
+
+
+Finally, the dramatic increase of litter C:P in the absence of enzyme repression is annulated when enzyme repression is introduced. Since phosphorus is too abundant in the substrate, P-acquiring enzymes are strongly repressed, slowing down the depolymerization of P-containing organic substrates.
+
+```{r, echo=FALSE, fig.cap="Litter C:P over time: Colors represent different repression points. Polymers that do not constitute and integral part of plant litter were excluded from this figure (e.g., necromass, inactive enzymes)", fig.width=6, fig.height=3.5}
+
+# Litter C:P (litter only)
+Litter.CP %>% 
+  ggplot(aes(x = days, y = Litter.CP)) + 
+  geom_path(aes(color = Repression.point)) +
+  labs(x = "Time (days)", color = "Repression point") +
+  theme_classic()
+
+```
+
+
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+
