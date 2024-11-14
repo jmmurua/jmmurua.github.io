@@ -6,7 +6,7 @@ Open Rstudio like any other program. You will see 3 panels. The left panel corre
 
 Look what happens if you write 1 + 1
 
-```{r}
+```{r, echo=TRUE}
 1 + 1
 
 ```
