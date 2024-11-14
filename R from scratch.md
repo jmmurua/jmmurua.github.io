@@ -1,5 +1,7 @@
 ---
+layout: page
 title: "R From Scratch"
+permalink: https://jmmurua.github.io/R_From_Scratch/ 
 subtitle: "The Fundamentals"
 author: "José M. Murúa Royo"
 date: "03-22-2023"
