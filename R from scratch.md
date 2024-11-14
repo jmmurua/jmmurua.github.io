@@ -2,10 +2,6 @@
 layout: page
 title: "R From Scratch"
 permalink: /R_From_Scratch
-subtitle: "The Fundamentals"
-author: "José M. Murúa Royo"
-date: "03-22-2023"
-
 ---
 
 
